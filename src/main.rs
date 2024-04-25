@@ -1,10 +1,10 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(dead_code)]
+
 use iced::{
-    theme::{self, palette},
-    widget::{
-        self, button, column, container, row, shader::wgpu::naga::back, text, text_input, Column,
-        Container,
-    },
-    Application, Border, Color, Command, Element, Length, Padding, Settings, Size, Theme,
+    application, theme,
+    widget::{self, button, column, container, row, text, text_input, Column},
+    Application, Border, Color, Command, Length, Settings, Size, Theme,
 };
 
 fn main() {
@@ -13,7 +13,6 @@ fn main() {
         width: 900.,
         height: 780.,
     });
-
     ThemeColors::run(settings).unwrap()
 }
 
@@ -28,12 +27,16 @@ pub enum Message {
     AdjustGreen(f32),
     AdjustBlue(f32),
     AdjustAlpha(f32),
+    ToggleThemeSelection,
+    ToggleLightDarkTheme,
 }
 
 pub struct ThemeColors {
     theme: Theme,
     colors: [Color; 15],
     selected_color: usize,
+    app_theme_as_selected: bool,
+    is_light_theme: bool,
 }
 
 impl Application for ThemeColors {
@@ -49,6 +52,8 @@ impl Application for ThemeColors {
             theme,
             colors,
             selected_color: 0,
+            app_theme_as_selected: false,
+            is_light_theme: true,
         };
 
         (colorpicker, iced::Command::none())
@@ -71,6 +76,10 @@ impl Application for ThemeColors {
             Message::AdjustGreen(new_value) => self.adjust_selected_green_color(new_value),
             Message::AdjustBlue(new_value) => self.adjust_selected_blue_color(new_value),
             Message::AdjustAlpha(new_value) => self.adjust_selected_alpha_color(new_value),
+            Message::ToggleThemeSelection => {
+                self.app_theme_as_selected = !self.app_theme_as_selected
+            }
+            Message::ToggleLightDarkTheme => self.is_light_theme = !self.is_light_theme,
         }
         Command::none()
     }
@@ -80,10 +89,27 @@ impl Application for ThemeColors {
             Message::SelectTheme(theme)
         });
 
-        let top_container = container(theme_picker)
-            .center_x()
-            .width(Length::Fill)
-            .padding(10);
+        let theme_as_selected = widget::Toggler::new(
+            Some("App theme follows selected".to_string()),
+            self.app_theme_as_selected,
+            |_| Message::ToggleThemeSelection,
+        )
+        .width(Length::Shrink);
+
+        let default_selector =
+            widget::toggler(Some("Light theme".to_string()), self.is_light_theme, |_| {
+                Message::ToggleLightDarkTheme
+            })
+            .width(Length::Shrink);
+
+        let top_container = container(
+            row!(theme_picker, theme_as_selected, default_selector)
+                .spacing(20)
+                .align_items(iced::Alignment::Center),
+        )
+        .center_x()
+        .width(Length::Fill)
+        .padding(10);
 
         let color_strength: Column<'_, Message, Self::Theme, iced::Renderer> = column!(
             widget::Space::new(1, 30),
@@ -157,11 +183,11 @@ impl Application for ThemeColors {
                 widget::Slider::new(0.0..=1.0, self.colors[self.selected_color].r, |new_value| {
                     Message::AdjustRed(new_value)
                 })
-                .step(0.01)
+                .step(0.005)
                 .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.2}", &self.colors[self.selected_color].r)).on_input(
+                text_input("", &format!("{:.3}", &self.colors[self.selected_color].r)).on_input(
                     |mut input| {
                         if input.is_empty() {
                             input.push('0')
@@ -194,11 +220,11 @@ impl Application for ThemeColors {
                 widget::Slider::new(0.0..=1.0, self.colors[self.selected_color].g, |new_value| {
                     Message::AdjustGreen(new_value)
                 })
-                .step(0.01)
+                .step(0.005)
                 .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.2}", &self.colors[self.selected_color].g)).on_input(
+                text_input("", &format!("{:.3}", &self.colors[self.selected_color].g)).on_input(
                     |mut input| {
                         if input.is_empty() {
                             input.push('0')
@@ -232,11 +258,11 @@ impl Application for ThemeColors {
                 self.colors[self.selected_color].b,
                 |new_value| Message::AdjustBlue(new_value),
             )
-            .step(0.01)
+            .step(0.005)
             .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.2}", &self.colors[self.selected_color].b)).on_input(
+                text_input("", &format!("{:.3}", &self.colors[self.selected_color].b)).on_input(
                     |mut input| {
                         if input.is_empty() {
                             input.push('0')
@@ -269,11 +295,11 @@ impl Application for ThemeColors {
                 widget::Slider::new(0.0..=1.0, self.colors[self.selected_color].a, |new_value| {
                     Message::AdjustAlpha(new_value)
                 })
-                .step(0.01)
+                .step(0.005)
                 .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.2}", &self.colors[self.selected_color].a)).on_input(
+                text_input("", &format!("{:.3}", &self.colors[self.selected_color].a)).on_input(
                     |mut input| {
                         if input.is_empty() {
                             input.push('0')
@@ -307,14 +333,22 @@ impl Application for ThemeColors {
             .center_x();
         let reset = container(
             row!(
-                button(text("Reset Selected"))
-                    .style(theme::Button::Primary)
-                    .on_press(Message::ResetSelected)
-                    .width(120),
-                button(text("Reset All"))
-                    .style(theme::Button::Primary)
-                    .on_press(Message::ResetAll)
-                    .width(120)
+                button(
+                    text("Reset Selected")
+                        .width(Length::Fill)
+                        .horizontal_alignment(iced::alignment::Horizontal::Center)
+                )
+                .style(theme::Button::Primary)
+                .on_press(Message::ResetSelected)
+                .width(120),
+                button(
+                    text("Reset All")
+                        .width(Length::Fill)
+                        .horizontal_alignment(iced::alignment::Horizontal::Center)
+                )
+                .style(theme::Button::Primary)
+                .on_press(Message::ResetAll)
+                .width(120)
             )
             .spacing(30),
         )
@@ -338,7 +372,15 @@ impl Application for ThemeColors {
     }
 
     fn theme(&self) -> Self::Theme {
-        self.theme.clone()
+        if self.app_theme_as_selected {
+            self.theme.clone()
+        } else {
+            if self.is_light_theme {
+                Theme::Light
+            } else {
+                Theme::Dark
+            }
+        }
     }
 }
 
@@ -412,5 +454,17 @@ fn selected_style(theme: &Theme) -> container::Appearance {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+struct ApplicationStyle;
+
+impl ApplicationStyle {
+    fn style(theme: &Theme) -> application::Appearance {
+        let palette = theme.extended_palette();
+        application::Appearance {
+            background_color: palette.background.base.color.inverse(),
+            text_color: palette.background.base.text,
+        }
     }
 }
