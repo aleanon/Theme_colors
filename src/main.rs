@@ -1,18 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![allow(dead_code)]
 
 use iced::{
-    application, theme,
-    widget::{self, button, column, container, row, text, text_input, Column},
-    Application, Border, Color, Command, Length, Settings, Size, Theme,
+    border::Radius,
+    theme::{
+        self,
+        palette::{Danger, Extended, Pair, Primary, Secondary, Success},
+        Palette,
+    },
+    widget::{self, button, column, container, row, text, text_input, tooltip::Position, Column},
+    Application, Background, Border, Color, Command, Length, Settings, Size, Theme,
 };
 
 fn main() {
     let mut settings = Settings::default();
     settings.window.min_size = Some(Size {
         width: 900.,
-        height: 780.,
+        height: 880.,
     });
+
     ThemeColors::run(settings).unwrap()
 }
 
@@ -21,20 +26,29 @@ pub enum Message {
     None,
     ResetSelected,
     ResetAll,
+    GenerateFromBase,
     SelectTheme(Theme),
-    SelectColor(usize),
+    SelectColor(Select),
     AdjustRed(f32),
     AdjustGreen(f32),
     AdjustBlue(f32),
     AdjustAlpha(f32),
     ToggleThemeSelection,
     ToggleLightDarkTheme,
+    TryTheme,
+}
+
+#[derive(Debug, Clone)]
+pub enum Select {
+    Palette(usize),
+    Extended((usize, usize)),
 }
 
 pub struct ThemeColors {
     theme: Theme,
-    colors: [Color; 15],
-    selected_color: usize,
+    palette: [Color; 5],
+    extended: [[Color; 2]; 15],
+    selected: Select,
     app_theme_as_selected: bool,
     is_light_theme: bool,
 }
@@ -47,13 +61,15 @@ impl Application for ThemeColors {
 
     fn new(_flags: Self::Flags) -> (Self, iced::Command<Self::Message>) {
         let theme = iced::Theme::Dark;
-        let colors = Self::populate_colors_array(&theme);
+        let extended = Self::populate_extended_array(theme.extended_palette());
+        let palette = Self::populate_palette_array(theme.palette());
         let colorpicker = Self {
             theme,
-            colors,
-            selected_color: 0,
+            palette,
+            extended,
+            selected: Select::Palette(0),
             app_theme_as_selected: false,
-            is_light_theme: true,
+            is_light_theme: false,
         };
 
         (colorpicker, iced::Command::none())
@@ -62,16 +78,27 @@ impl Application for ThemeColors {
     fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
         match message {
             Message::None => {}
-            Message::ResetSelected => {
-                let colors = Self::populate_colors_array(&self.theme);
-                self.colors[self.selected_color] = colors[self.selected_color];
+            Message::ResetSelected => match self.selected {
+                Select::Palette(index) => {
+                    let palette = Self::populate_palette_array(self.theme.palette());
+                    self.palette[index] = palette[index];
+                }
+                Select::Extended((index1, index2)) => {
+                    let extended = Self::populate_extended_array(self.theme.extended_palette());
+                    self.extended[index1][index2] = extended[index1][index2];
+                }
+            },
+            Message::ResetAll => {
+                self.palette = Self::populate_palette_array(self.theme.palette());
+                self.extended = Self::populate_extended_array(self.theme.extended_palette())
             }
-            Message::ResetAll => self.colors = Self::populate_colors_array(&self.theme),
+            Message::GenerateFromBase => self.generate_extended_from_palette(),
             Message::SelectTheme(theme) => {
-                self.colors = Self::populate_colors_array(&theme);
+                self.palette = Self::populate_palette_array(theme.palette());
+                self.extended = Self::populate_extended_array(theme.extended_palette());
                 self.theme = theme;
             }
-            Message::SelectColor(selected) => self.selected_color = selected,
+            Message::SelectColor(selected) => self.selected = selected,
             Message::AdjustRed(new_value) => self.adjust_selected_red_color(new_value),
             Message::AdjustGreen(new_value) => self.adjust_selected_green_color(new_value),
             Message::AdjustBlue(new_value) => self.adjust_selected_blue_color(new_value),
@@ -80,6 +107,14 @@ impl Application for ThemeColors {
                 self.app_theme_as_selected = !self.app_theme_as_selected
             }
             Message::ToggleLightDarkTheme => self.is_light_theme = !self.is_light_theme,
+            Message::TryTheme => {
+                self.app_theme_as_selected = true;
+                self.theme = Theme::custom_with_fn(
+                    "Custom".to_string(),
+                    self.palette_from_palette_array(),
+                    |palette| self.extendedpalette_from_colors_array(palette),
+                );
+            }
         }
         Command::none()
     }
@@ -89,21 +124,21 @@ impl Application for ThemeColors {
             Message::SelectTheme(theme)
         });
 
-        let theme_as_selected = widget::Toggler::new(
+        let as_selected_toggler = widget::Toggler::new(
             Some("App theme follows selected".to_string()),
             self.app_theme_as_selected,
             |_| Message::ToggleThemeSelection,
         )
         .width(Length::Shrink);
 
-        let default_selector =
+        let theme_toggler =
             widget::toggler(Some("Light theme".to_string()), self.is_light_theme, |_| {
                 Message::ToggleLightDarkTheme
             })
             .width(Length::Shrink);
 
         let top_container = container(
-            row!(theme_picker, theme_as_selected, default_selector)
+            row!(theme_picker, as_selected_toggler, theme_toggler)
                 .spacing(20)
                 .align_items(iced::Alignment::Center),
         )
@@ -111,94 +146,206 @@ impl Application for ThemeColors {
         .width(Length::Fill)
         .padding(10);
 
-        let color_strength: Column<'_, Message, Self::Theme, iced::Renderer> = column!(
-            widget::Space::new(1, 30),
-            container(text("Base")).height(150).width(50).center_y(),
-            container(text("Weak")).height(150).width(50).center_y(),
-            container(text("Strong")).height(150).width(50).center_y(),
-        )
-        .spacing(10);
+        let palette = {
+            let label = row!(
+                widget::Space::new(50, 1),
+                text("Palette")
+                    .size(18)
+                    .width(Length::Fill)
+                    .horizontal_alignment(iced::alignment::Horizontal::Center)
+            )
+            .width(Length::Fill)
+            .spacing(10);
 
-        let mut background = column!(text("Background").height(30))
-            .spacing(10)
-            .align_items(iced::Alignment::Center);
-        let mut primary = column!(text("Primary").height(30))
-            .spacing(10)
-            .align_items(iced::Alignment::Center);
-        let mut secondary = column!(text("Secondary").height(30))
-            .spacing(10)
-            .align_items(iced::Alignment::Center);
-        let mut success = column!(text("Success").height(30))
-            .spacing(10)
-            .align_items(iced::Alignment::Center);
-        let mut danger = column!(text("Danger").height(30))
-            .spacing(10)
-            .align_items(iced::Alignment::Center);
+            let mut background = column!(text("Background"))
+                .align_items(iced::Alignment::Center)
+                .spacing(10);
+            let mut primary = column!(text("Primary"))
+                .align_items(iced::Alignment::Center)
+                .spacing(10);
+            let mut text_color = column!(text("Text"))
+                .align_items(iced::Alignment::Center)
+                .spacing(10);
+            let mut success = column!(text("Success"))
+                .align_items(iced::Alignment::Center)
+                .spacing(10);
+            let mut danger = column!(text("Danger"))
+                .align_items(iced::Alignment::Center)
+                .spacing(10);
 
-        for (i, color) in self.colors.iter().enumerate() {
-            let color_view =
-                container(column!())
-                    .width(150)
-                    .height(150)
-                    .style(container::Appearance {
-                        background: Some(iced::Background::Color(*color)),
-                        ..Default::default()
-                    });
-            let mut select_color = container(
-                button(color_view)
+            for (i, color) in self.palette.iter().enumerate() {
+                let color_view =
+                    container(column!())
+                        .width(150)
+                        .height(110)
+                        .style(container::Appearance {
+                            background: Some(Background::Color(*color)),
+                            ..container::Appearance::default()
+                        });
+
+                let color_selector = button(color_view)
                     .padding(2)
                     .style(theme::Button::Text)
-                    .on_press(Message::SelectColor(i)),
-            );
+                    .on_press(Message::SelectColor(Select::Palette(i)));
 
-            if i == self.selected_color {
-                select_color = select_color.style(selected_style)
+                let mut container = container(color_selector);
+
+                if let Select::Palette(selected) = self.selected {
+                    if selected == i {
+                        container = container.style(selected_style)
+                    }
+                }
+
+                match i {
+                    0 => background = background.push(container),
+                    1 => primary = primary.push(container),
+                    2 => text_color = text_color.push(container),
+                    3 => success = success.push(container),
+                    4 => danger = danger.push(container),
+                    _ => unreachable!(),
+                }
             }
 
-            match i {
-                0..=2 => background = background.push(select_color),
-                3..=5 => primary = primary.push(select_color),
-                6..=8 => secondary = secondary.push(select_color),
-                9..=11 => success = success.push(select_color),
-                12..=14 => danger = danger.push(select_color),
-                _ => unreachable!(),
+            let content = column!(
+                label,
+                row!(
+                    widget::Space::new(50, 1),
+                    background,
+                    primary,
+                    text_color,
+                    success,
+                    danger
+                )
+                .spacing(10)
+            )
+            .align_items(iced::Alignment::Center)
+            .spacing(5);
+            container(content).center_x()
+        };
+
+        let extended = {
+            let label = row!(
+                widget::Space::new(50, 1),
+                text("Extended")
+                    .size(18)
+                    .width(Length::Fill)
+                    .horizontal_alignment(iced::alignment::Horizontal::Center)
+            )
+            .spacing(10)
+            .width(Length::Fill);
+            let color_strength: Column<'_, Message, Self::Theme, iced::Renderer> = column!(
+                widget::Space::new(1, 30),
+                container(text("Base")).height(110).width(50).center_y(),
+                container(text("Weak")).height(110).width(50).center_y(),
+                container(text("Strong")).height(110).width(50).center_y(),
+            )
+            .spacing(10);
+
+            let mut background = column!(text("Background").height(30))
+                .spacing(10)
+                .align_items(iced::Alignment::Center);
+            let mut primary = column!(text("Primary").height(30))
+                .spacing(10)
+                .align_items(iced::Alignment::Center);
+            let mut secondary = column!(text("Secondary").height(30))
+                .spacing(10)
+                .align_items(iced::Alignment::Center);
+            let mut success = column!(text("Success").height(30))
+                .spacing(10)
+                .align_items(iced::Alignment::Center);
+            let mut danger = column!(text("Danger").height(30))
+                .spacing(10)
+                .align_items(iced::Alignment::Center);
+
+            for (i, color) in self.extended.iter().enumerate() {
+                let mut text = container(
+                    button(text("Text").style(theme::Text::Color(color[1])))
+                        .style(theme::Button::Text)
+                        .on_press(Message::SelectColor(Select::Extended((i, 1)))),
+                );
+
+                if let Select::Extended((index, ii)) = self.selected {
+                    if index == i && ii == 1 {
+                        text = text.style(selected_style)
+                    }
+                }
+
+                let color_view = container(text)
+                    .center_x()
+                    .center_y()
+                    .width(150)
+                    .height(110)
+                    .style(container::Appearance {
+                        background: Some(iced::Background::Color(color[0])),
+                        ..Default::default()
+                    });
+                let mut select_color = container(
+                    button(color_view)
+                        .padding(2)
+                        .style(theme::Button::Text)
+                        .on_press(Message::SelectColor(Select::Extended((i, 0)))),
+                );
+
+                if let Select::Extended((index, ii)) = self.selected {
+                    if index == i && ii == 0 {
+                        select_color = select_color.style(selected_style)
+                    }
+                }
+
+                match i {
+                    0..=2 => background = background.push(select_color),
+                    3..=5 => primary = primary.push(select_color),
+                    6..=8 => secondary = secondary.push(select_color),
+                    9..=11 => success = success.push(select_color),
+                    12..=14 => danger = danger.push(select_color),
+                    _ => unreachable!(),
+                }
             }
-        }
 
-        let grid = row!(
-            color_strength,
-            background,
-            primary,
-            secondary,
-            success,
-            danger
-        )
-        .spacing(10);
+            let grid = row!(
+                color_strength,
+                background,
+                primary,
+                secondary,
+                success,
+                danger
+            )
+            .spacing(10);
 
-        let rgba_selected = self.colors[self.selected_color].into_rgba8();
+            let content = column!(label, grid)
+                .align_items(iced::Alignment::Center)
+                .spacing(5);
+
+            container(content).center_x()
+        };
+
+        let rgba_selected = match self.selected {
+            Select::Palette(index) => self.palette[index].into_rgba8(),
+            Select::Extended((index1, index2)) => self.extended[index1][index2].into_rgba8(),
+        };
 
         let adjust_red = {
             let text = text("Red").width(50);
+            let value = match self.selected {
+                Select::Palette(index) => self.palette[index].r,
+                Select::Extended((index1, index2)) => self.extended[index1][index2].r,
+            };
             let slider =
-                widget::Slider::new(0.0..=1.0, self.colors[self.selected_color].r, |new_value| {
-                    Message::AdjustRed(new_value)
-                })
-                .step(0.005)
-                .width(300);
+                widget::Slider::new(0.0..=1.0, value, |new_value| Message::AdjustRed(new_value))
+                    .step(0.005)
+                    .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.3}", &self.colors[self.selected_color].r)).on_input(
-                    |mut input| {
-                        if input.is_empty() {
-                            input.push('0')
-                        }
-                        if let Ok(value) = input.parse::<f32>() {
-                            Message::AdjustRed(value)
-                        } else {
-                            Message::None
-                        }
+                text_input("", &format!("{:.3}", value)).on_input(|mut input| {
+                    if input.is_empty() {
+                        input.push('0')
                     }
-                ),
+                    if let Ok(value) = input.parse::<f32>() {
+                        Message::AdjustRed(value)
+                    } else {
+                        Message::None
+                    }
+                }),
                 text_input("", &rgba_selected[0].to_string()).on_input(|mut input| {
                     if input.is_empty() {
                         input.push('0')
@@ -216,26 +363,27 @@ impl Application for ThemeColors {
 
         let adjust_green = {
             let text = text("Green").width(50);
-            let slider =
-                widget::Slider::new(0.0..=1.0, self.colors[self.selected_color].g, |new_value| {
-                    Message::AdjustGreen(new_value)
-                })
-                .step(0.005)
-                .width(300);
+            let value = match self.selected {
+                Select::Palette(index) => self.palette[index].g,
+                Select::Extended((index1, index2)) => self.extended[index1][index2].g,
+            };
+            let slider = widget::Slider::new(0.0..=1.0, value, |new_value| {
+                Message::AdjustGreen(new_value)
+            })
+            .step(0.005)
+            .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.3}", &self.colors[self.selected_color].g)).on_input(
-                    |mut input| {
-                        if input.is_empty() {
-                            input.push('0')
-                        }
-                        if let Ok(value) = input.parse::<f32>() {
-                            Message::AdjustGreen(value)
-                        } else {
-                            Message::None
-                        }
+                text_input("", &format!("{:.3}", value)).on_input(|mut input| {
+                    if input.is_empty() {
+                        input.push('0')
                     }
-                ),
+                    if let Ok(value) = input.parse::<f32>() {
+                        Message::AdjustGreen(value)
+                    } else {
+                        Message::None
+                    }
+                }),
                 text_input("", &rgba_selected[1].to_string()).on_input(|mut input| {
                     if input.is_empty() {
                         input.push('0')
@@ -253,27 +401,27 @@ impl Application for ThemeColors {
 
         let adjust_blue = {
             let text = text("Blue").width(50);
-            let slider = widget::Slider::new(
-                0.00..=1.00,
-                self.colors[self.selected_color].b,
-                |new_value| Message::AdjustBlue(new_value),
-            )
+            let value = match self.selected {
+                Select::Palette(index) => self.palette[index].b,
+                Select::Extended((index1, index2)) => self.extended[index1][index2].b,
+            };
+            let slider = widget::Slider::new(0.00..=1.00, value, |new_value| {
+                Message::AdjustBlue(new_value)
+            })
             .step(0.005)
             .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.3}", &self.colors[self.selected_color].b)).on_input(
-                    |mut input| {
-                        if input.is_empty() {
-                            input.push('0')
-                        }
-                        if let Ok(value) = input.parse::<f32>() {
-                            Message::AdjustBlue(value)
-                        } else {
-                            Message::None
-                        }
+                text_input("", &format!("{:.3}", value)).on_input(|mut input| {
+                    if input.is_empty() {
+                        input.push('0')
                     }
-                ),
+                    if let Ok(value) = input.parse::<f32>() {
+                        Message::AdjustBlue(value)
+                    } else {
+                        Message::None
+                    }
+                }),
                 text_input("", &rgba_selected[2].to_string()).on_input(|mut input| {
                     if input.is_empty() {
                         input.push('0')
@@ -291,26 +439,27 @@ impl Application for ThemeColors {
 
         let adjust_alpha = {
             let text = text("Alpha").width(50);
-            let slider =
-                widget::Slider::new(0.0..=1.0, self.colors[self.selected_color].a, |new_value| {
-                    Message::AdjustAlpha(new_value)
-                })
-                .step(0.005)
-                .width(300);
+            let value = match self.selected {
+                Select::Palette(index) => self.palette[index].a,
+                Select::Extended((index1, index2)) => self.extended[index1][index2].a,
+            };
+            let slider = widget::Slider::new(0.0..=1.0, value, |new_value| {
+                Message::AdjustAlpha(new_value)
+            })
+            .step(0.005)
+            .width(300);
             let text_and_slider = row!(text, slider).spacing(5);
             let inputs = row!(
-                text_input("", &format!("{:.3}", &self.colors[self.selected_color].a)).on_input(
-                    |mut input| {
-                        if input.is_empty() {
-                            input.push('0')
-                        }
-                        if let Ok(value) = input.parse::<f32>() {
-                            Message::AdjustAlpha(value)
-                        } else {
-                            Message::None
-                        }
+                text_input("", &format!("{:.3}", value)).on_input(|mut input| {
+                    if input.is_empty() {
+                        input.push('0')
                     }
-                ),
+                    if let Ok(value) = input.parse::<f32>() {
+                        Message::AdjustAlpha(value)
+                    } else {
+                        Message::None
+                    }
+                }),
                 text_input("", &rgba_selected[3].to_string()).on_input(|mut input| {
                     if input.is_empty() {
                         input.push('0')
@@ -331,6 +480,7 @@ impl Application for ThemeColors {
         let sliders = container(column!(red_green, blue_alpha).spacing(10))
             .width(Length::Fill)
             .center_x();
+
         let reset = container(
             row!(
                 button(
@@ -338,24 +488,51 @@ impl Application for ThemeColors {
                         .width(Length::Fill)
                         .horizontal_alignment(iced::alignment::Horizontal::Center)
                 )
-                .style(theme::Button::Primary)
                 .on_press(Message::ResetSelected)
-                .width(120),
+                .width(150),
                 button(
                     text("Reset All")
                         .width(Length::Fill)
                         .horizontal_alignment(iced::alignment::Horizontal::Center)
                 )
-                .style(theme::Button::Primary)
                 .on_press(Message::ResetAll)
-                .width(120)
+                .width(150),
+                widget::tooltip(
+                    button(
+                        text("Generate Extended")
+                            .width(Length::Fill)
+                            .horizontal_alignment(iced::alignment::Horizontal::Center)
+                    )
+                    .on_press(Message::GenerateFromBase)
+                    .width(150),
+                    container(
+                        text("Generates the extended palette from Palette")
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                    )
+                    .height(60)
+                    .width(180)
+                    .padding(5)
+                    .center_x()
+                    .center_y()
+                    .style(TooltipContainerStyle::style),
+                    Position::Top,
+                )
+                .gap(10),
+                button(
+                    text("Try Theme")
+                        .width(Length::Fill)
+                        .horizontal_alignment(iced::alignment::Horizontal::Center)
+                )
+                .on_press(Message::TryTheme)
+                .width(150)
             )
             .spacing(30),
         )
         .width(Length::Fill)
         .center_x();
 
-        let content = column!(top_container, grid, sliders, reset)
+        let content = column!(top_container, palette, extended, sliders, reset)
             .align_items(iced::Alignment::Center)
             .spacing(15);
 
@@ -392,7 +569,10 @@ impl ThemeColors {
             new_value = 0.0;
         }
 
-        self.colors[self.selected_color].r = new_value;
+        match self.selected {
+            Select::Palette(index) => self.palette[index].r = new_value,
+            Select::Extended((index1, index2)) => self.extended[index1][index2].r = new_value,
+        }
     }
 
     fn adjust_selected_green_color(&mut self, mut new_value: f32) {
@@ -401,7 +581,11 @@ impl ThemeColors {
         } else if new_value < 0.0 {
             new_value = 0.0;
         }
-        self.colors[self.selected_color].g = new_value;
+
+        match self.selected {
+            Select::Palette(index) => self.palette[index].g = new_value,
+            Select::Extended((index1, index2)) => self.extended[index1][index2].g = new_value,
+        }
     }
 
     fn adjust_selected_blue_color(&mut self, mut new_value: f32) {
@@ -410,7 +594,11 @@ impl ThemeColors {
         } else if new_value < 0.0 {
             new_value = 0.0;
         }
-        self.colors[self.selected_color].b = new_value;
+
+        match self.selected {
+            Select::Palette(index) => self.palette[index].b = new_value,
+            Select::Extended((index1, index2)) => self.extended[index1][index2].b = new_value,
+        }
     }
 
     fn adjust_selected_alpha_color(&mut self, mut new_value: f32) {
@@ -419,27 +607,140 @@ impl ThemeColors {
         } else if new_value < 0.0 {
             new_value = 0.0;
         }
-        self.colors[self.selected_color].a = new_value;
+
+        match self.selected {
+            Select::Palette(index) => self.palette[index].a = new_value,
+            Select::Extended((index1, index2)) => self.extended[index1][index2].a = new_value,
+        }
     }
 
-    fn populate_colors_array(theme: &Theme) -> [Color; 15] {
-        let palette = theme.extended_palette();
+    fn generate_extended_from_palette(&mut self) {
+        let palette = self.palette_from_palette_array();
+
+        let extended = Extended::generate(palette);
+        self.extended = Self::populate_extended_array(&extended);
+    }
+
+    fn palette_from_palette_array(&self) -> Palette {
+        Palette {
+            background: self.palette[0],
+            primary: self.palette[1],
+            text: self.palette[2],
+            success: self.palette[3],
+            danger: self.palette[4],
+        }
+    }
+
+    fn extendedpalette_from_colors_array(&self, palette: Palette) -> Extended {
+        let generated_extended = Extended::generate(palette);
+        Extended {
+            background: theme::palette::Background {
+                base: Pair {
+                    color: self.extended[0][0],
+                    text: self.extended[0][1],
+                },
+                weak: Pair {
+                    color: self.extended[1][0],
+                    text: self.extended[1][1],
+                },
+                strong: Pair {
+                    color: self.extended[2][0],
+                    text: self.extended[2][1],
+                },
+            },
+            primary: Primary {
+                base: Pair {
+                    color: self.extended[3][0],
+                    text: self.extended[3][1],
+                },
+                weak: Pair {
+                    color: self.extended[4][0],
+                    text: self.extended[4][1],
+                },
+                strong: Pair {
+                    color: self.extended[5][0],
+                    text: self.extended[5][1],
+                },
+            },
+            secondary: Secondary {
+                base: Pair {
+                    color: self.extended[6][0],
+                    text: self.extended[6][1],
+                },
+                weak: Pair {
+                    color: self.extended[7][0],
+                    text: self.extended[7][1],
+                },
+                strong: Pair {
+                    color: self.extended[8][0],
+                    text: self.extended[8][1],
+                },
+            },
+            success: Success {
+                base: Pair {
+                    color: self.extended[9][0],
+                    text: self.extended[9][1],
+                },
+                weak: Pair {
+                    color: self.extended[10][0],
+                    text: self.extended[10][1],
+                },
+                strong: Pair {
+                    color: self.extended[11][0],
+                    text: self.extended[11][1],
+                },
+            },
+            danger: Danger {
+                base: Pair {
+                    color: self.extended[12][0],
+                    text: self.extended[12][1],
+                },
+                weak: Pair {
+                    color: self.extended[13][0],
+                    text: self.extended[13][1],
+                },
+                strong: Pair {
+                    color: self.extended[14][0],
+                    text: self.extended[14][1],
+                },
+            },
+            is_dark: generated_extended.is_dark,
+        }
+    }
+
+    fn populate_palette_array(palette: Palette) -> [Color; 5] {
         [
-            palette.background.base.color,
-            palette.background.weak.color,
-            palette.background.strong.color,
-            palette.primary.base.color,
-            palette.primary.weak.color,
-            palette.primary.strong.color,
-            palette.secondary.base.color,
-            palette.secondary.weak.color,
-            palette.secondary.strong.color,
-            palette.success.base.color,
-            palette.success.weak.color,
-            palette.success.strong.color,
-            palette.danger.base.color,
-            palette.danger.weak.color,
-            palette.danger.strong.color,
+            palette.background,
+            palette.primary,
+            palette.text,
+            palette.success,
+            palette.danger,
+        ]
+    }
+
+    fn populate_extended_array(palette: &Extended) -> [[Color; 2]; 15] {
+        [
+            [palette.background.base.color, palette.background.base.text],
+            [palette.background.weak.color, palette.background.weak.text],
+            [
+                palette.background.strong.color,
+                palette.background.strong.text,
+            ],
+            [palette.primary.base.color, palette.primary.base.text],
+            [palette.primary.weak.color, palette.primary.weak.text],
+            [palette.primary.strong.color, palette.primary.strong.text],
+            [palette.secondary.base.color, palette.secondary.base.text],
+            [palette.secondary.weak.color, palette.secondary.weak.text],
+            [
+                palette.secondary.strong.color,
+                palette.secondary.strong.text,
+            ],
+            [palette.success.base.color, palette.success.base.text],
+            [palette.success.weak.color, palette.success.weak.text],
+            [palette.success.strong.color, palette.success.strong.text],
+            [palette.danger.base.color, palette.danger.base.text],
+            [palette.danger.weak.color, palette.danger.weak.text],
+            [palette.danger.strong.color, palette.danger.strong.text],
         ]
     }
 }
@@ -457,14 +758,23 @@ fn selected_style(theme: &Theme) -> container::Appearance {
     }
 }
 
-struct ApplicationStyle;
+struct TooltipContainerStyle;
 
-impl ApplicationStyle {
-    fn style(theme: &Theme) -> application::Appearance {
+impl TooltipContainerStyle {
+    fn style(theme: &Theme) -> container::Appearance {
         let palette = theme.extended_palette();
-        application::Appearance {
-            background_color: palette.background.base.color.inverse(),
-            text_color: palette.background.base.text,
+        let mut background = palette.background.base.color;
+        background.r += 0.03;
+        background.g += 0.03;
+        background.b += 0.03;
+
+        container::Appearance {
+            background: Some(iced::Background::Color(background)),
+            border: Border {
+                radius: Radius::from(5.),
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
 }
