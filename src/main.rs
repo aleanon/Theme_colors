@@ -1,7 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Arc;
-
 use iced::{
     border::Radius,
     theme::{
@@ -10,7 +8,6 @@ use iced::{
         Palette,
     },
     widget::{self, button, column, container, row, text, text_input, tooltip::Position, Column},
-    window::{self, Icon},
     Application, Background, Border, Color, Command, Length, Settings, Size, Theme,
 };
 
