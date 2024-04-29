@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Arc;
+
 use iced::{
     border::Radius,
     theme::{
@@ -8,6 +10,7 @@ use iced::{
         Palette,
     },
     widget::{self, button, column, container, row, text, text_input, tooltip::Position, Column},
+    window::{self, Icon},
     Application, Background, Border, Color, Command, Length, Settings, Size, Theme,
 };
 
@@ -27,14 +30,15 @@ pub enum Message {
     ResetSelected,
     ResetAll,
     GenerateFromBase,
-    SelectTheme(Theme),
+    SelectWorkingTheme(Theme),
+    SelectAppTheme(Theme),
     SelectColor(Select),
     AdjustRed(f32),
     AdjustGreen(f32),
     AdjustBlue(f32),
     AdjustAlpha(f32),
-    ToggleThemeSelection,
-    ToggleLightDarkTheme,
+    // ToggleThemeSelection,
+    // ToggleLightDarkTheme,
     TryTheme,
 }
 
@@ -45,12 +49,12 @@ pub enum Select {
 }
 
 pub struct ThemeColors {
-    theme: Theme,
+    themes: [Theme; 22],
+    app_theme: Theme,
+    working_theme: Theme,
     palette: [Color; 5],
     extended: [[Color; 2]; 15],
     selected: Select,
-    app_theme_as_selected: bool,
-    is_light_theme: bool,
 }
 
 impl Application for ThemeColors {
@@ -60,16 +64,16 @@ impl Application for ThemeColors {
     type Flags = ();
 
     fn new(_flags: Self::Flags) -> (Self, iced::Command<Self::Message>) {
-        let theme = iced::Theme::Dark;
-        let extended = Self::populate_extended_array(theme.extended_palette());
-        let palette = Self::populate_palette_array(theme.palette());
+        let working_theme = iced::Theme::Dark;
+        let extended = Self::populate_extended_array(working_theme.extended_palette());
+        let palette = Self::populate_palette_array(working_theme.palette());
         let colorpicker = Self {
-            theme,
+            themes: Self::themes_array(),
+            app_theme: Theme::Dark,
+            working_theme,
             palette,
             extended,
             selected: Select::Palette(0),
-            app_theme_as_selected: false,
-            is_light_theme: false,
         };
 
         (colorpicker, iced::Command::none())
@@ -80,65 +84,67 @@ impl Application for ThemeColors {
             Message::None => {}
             Message::ResetSelected => match self.selected {
                 Select::Palette(index) => {
-                    let palette = Self::populate_palette_array(self.theme.palette());
+                    let palette = Self::populate_palette_array(self.working_theme.palette());
                     self.palette[index] = palette[index];
                 }
                 Select::Extended((index1, index2)) => {
-                    let extended = Self::populate_extended_array(self.theme.extended_palette());
+                    let extended =
+                        Self::populate_extended_array(self.working_theme.extended_palette());
                     self.extended[index1][index2] = extended[index1][index2];
                 }
             },
             Message::ResetAll => {
-                self.palette = Self::populate_palette_array(self.theme.palette());
-                self.extended = Self::populate_extended_array(self.theme.extended_palette())
+                self.palette = Self::populate_palette_array(self.working_theme.palette());
+                self.extended = Self::populate_extended_array(self.working_theme.extended_palette())
             }
             Message::GenerateFromBase => self.generate_extended_from_palette(),
-            Message::SelectTheme(theme) => {
+            Message::SelectAppTheme(theme) => self.app_theme = theme,
+            Message::SelectWorkingTheme(theme) => {
                 self.palette = Self::populate_palette_array(theme.palette());
                 self.extended = Self::populate_extended_array(theme.extended_palette());
-                self.theme = theme;
+                self.working_theme = theme;
             }
             Message::SelectColor(selected) => self.selected = selected,
             Message::AdjustRed(new_value) => self.adjust_selected_red_color(new_value),
             Message::AdjustGreen(new_value) => self.adjust_selected_green_color(new_value),
             Message::AdjustBlue(new_value) => self.adjust_selected_blue_color(new_value),
             Message::AdjustAlpha(new_value) => self.adjust_selected_alpha_color(new_value),
-            Message::ToggleThemeSelection => {
-                self.app_theme_as_selected = !self.app_theme_as_selected
-            }
-            Message::ToggleLightDarkTheme => self.is_light_theme = !self.is_light_theme,
+            // Message::ToggleThemeSelection => self.use_selected_theme = !self.use_selected_theme,
+            // Message::ToggleLightDarkTheme => self.light_theme = !self.light_theme,
             Message::TryTheme => {
-                self.app_theme_as_selected = true;
-                self.theme = Theme::custom_with_fn(
+                self.themes[0] = Theme::custom_with_fn(
                     "Custom".to_string(),
                     self.palette_from_palette_array(),
                     |palette| self.extendedpalette_from_colors_array(palette),
                 );
+                self.working_theme = self.themes[0].clone();
+                self.app_theme = self.themes[0].clone();
             }
         }
         Command::none()
     }
 
     fn view(&self) -> iced::Element<'_, Self::Message, Self::Theme, iced::Renderer> {
-        let theme_picker = widget::PickList::new(iced::Theme::ALL, Some(&self.theme), |theme| {
-            Message::SelectTheme(theme)
-        });
+        let label = text("App Theme");
+        let app_theme_picker =
+            widget::pick_list(self.themes.as_slice(), Some(&self.app_theme), |theme| {
+                Message::SelectAppTheme(theme)
+            });
+        let label_and_app_theme_picker = row!(label, app_theme_picker)
+            .spacing(5)
+            .align_items(iced::Alignment::Center);
 
-        let as_selected_toggler = widget::Toggler::new(
-            Some("App theme follows selected".to_string()),
-            self.app_theme_as_selected,
-            |_| Message::ToggleThemeSelection,
-        )
-        .width(Length::Shrink);
-
-        let theme_toggler =
-            widget::toggler(Some("Light theme".to_string()), self.is_light_theme, |_| {
-                Message::ToggleLightDarkTheme
-            })
-            .width(Length::Shrink);
+        let label = text("Working Theme");
+        let working_theme_picker =
+            widget::PickList::new(self.themes.as_slice(), Some(&self.working_theme), |theme| {
+                Message::SelectWorkingTheme(theme)
+            });
+        let label_and_working_theme_picker = row!(label, working_theme_picker)
+            .spacing(5)
+            .align_items(iced::Alignment::Center);
 
         let top_container = container(
-            row!(theme_picker, as_selected_toggler, theme_toggler)
+            row!(label_and_app_theme_picker, label_and_working_theme_picker)
                 .spacing(20)
                 .align_items(iced::Alignment::Center),
         )
@@ -549,15 +555,7 @@ impl Application for ThemeColors {
     }
 
     fn theme(&self) -> Self::Theme {
-        if self.app_theme_as_selected {
-            self.theme.clone()
-        } else {
-            if self.is_light_theme {
-                Theme::Light
-            } else {
-                Theme::Dark
-            }
-        }
+        self.app_theme.clone()
     }
 }
 
@@ -741,6 +739,33 @@ impl ThemeColors {
             [palette.danger.base.color, palette.danger.base.text],
             [palette.danger.weak.color, palette.danger.weak.text],
             [palette.danger.strong.color, palette.danger.strong.text],
+        ]
+    }
+
+    fn themes_array() -> [Theme; 22] {
+        [
+            Theme::custom("Custom".to_string(), Theme::Dark.palette()),
+            Theme::Light,
+            Theme::Dark,
+            Theme::Dracula,
+            Theme::Nord,
+            Theme::SolarizedLight,
+            Theme::SolarizedDark,
+            Theme::GruvboxLight,
+            Theme::GruvboxDark,
+            Theme::CatppuccinLatte,
+            Theme::CatppuccinFrappe,
+            Theme::CatppuccinMacchiato,
+            Theme::CatppuccinMocha,
+            Theme::TokyoNight,
+            Theme::TokyoNightStorm,
+            Theme::TokyoNightLight,
+            Theme::KanagawaWave,
+            Theme::KanagawaDragon,
+            Theme::KanagawaLotus,
+            Theme::Moonfly,
+            Theme::Nightfly,
+            Theme::Oxocarbon,
         ]
     }
 }
